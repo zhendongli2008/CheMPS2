@@ -1,6 +1,6 @@
 /*
    CheMPS2: a spin-adapted implementation of DMRG for ab initio quantum chemistry
-   Copyright (C) 2013, 2014 Sebastian Wouters
+   Copyright (C) 2013-2018 Sebastian Wouters
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -38,7 +38,7 @@ CheMPS2::Irreps::Irreps(const int nGroup){
    if ((nGroup >= 0) && (nGroup <= 7)){
       isActivated = true;
       groupNumber = nGroup;
-      nIrreps = getNumberOfIrrepsPrivate(groupNumber);
+      nIrreps = getNumberOfIrreps(groupNumber);
    } else {
       isActivated = false;
    }
@@ -52,7 +52,7 @@ bool CheMPS2::Irreps::setGroup(const int nGroup){
    if ((nGroup >= 0) && (nGroup <= 7)){
       isActivated = true;
       groupNumber = nGroup;
-      nIrreps = getNumberOfIrrepsPrivate(groupNumber);
+      nIrreps = getNumberOfIrreps(groupNumber);
    } else {
       isActivated = false;
    }
@@ -97,8 +97,9 @@ int CheMPS2::Irreps::getNumberOfIrreps() const{
 
 }
 
-int CheMPS2::Irreps::getNumberOfIrrepsPrivate(const int nGroup){
+int CheMPS2::Irreps::getNumberOfIrreps(const int nGroup){
    
+   if ((nGroup < 0) || ( nGroup > 7)){ return -1; }
    if (nGroup == 0) return 1;
    if (nGroup <= 3) return 2;
    if (nGroup <= 6) return 4;
@@ -133,8 +134,8 @@ string CheMPS2::Irreps::getIrrepNamePrivate(const int nGroup, const int nIrrep){
    }
    
    if (nGroup == 3){
-      if (nIrrep == 0) return "A'";
-      if (nIrrep == 1) return "A\"";
+      if (nIrrep == 0) return "Ap";
+      if (nIrrep == 1) return "App";
    }
    
    if (nGroup == 4){
@@ -173,15 +174,56 @@ string CheMPS2::Irreps::getIrrepNamePrivate(const int nGroup, const int nIrrep){
 
 }
 
+void CheMPS2::Irreps::symm_psi2molpro( int * psi2molpro ) const{
+
+   if (!isActivated) return;
+   symm_psi2molpro( psi2molpro, getGroupName() );
+
+}
+
+void CheMPS2::Irreps::symm_psi2molpro( int * psi2molpro, const string SymmLabel ){
+
+   if ( SymmLabel.compare("c1")==0 ){
+      psi2molpro[0] = 1;
+   }
+   if ( ( SymmLabel.compare("ci")==0 ) || ( SymmLabel.compare("c2")==0 ) || ( SymmLabel.compare("cs")==0 ) ){
+      psi2molpro[0] = 1;
+      psi2molpro[1] = 2;
+   }
+   if ( ( SymmLabel.compare("d2")==0 ) ){
+      psi2molpro[0] = 1;
+      psi2molpro[1] = 4;
+      psi2molpro[2] = 3;
+      psi2molpro[3] = 2;
+   }
+   if ( ( SymmLabel.compare("c2v")==0 ) || ( SymmLabel.compare("c2h")==0 ) ){
+      psi2molpro[0] = 1;
+      psi2molpro[1] = 4;
+      psi2molpro[2] = 2;
+      psi2molpro[3] = 3;
+   }
+   if ( ( SymmLabel.compare("d2h")==0 ) ){
+      psi2molpro[0] = 1;
+      psi2molpro[1] = 4;
+      psi2molpro[2] = 6;
+      psi2molpro[3] = 7;
+      psi2molpro[4] = 8;
+      psi2molpro[5] = 5;
+      psi2molpro[6] = 3;
+      psi2molpro[7] = 2;
+   }
+
+}
+
 void CheMPS2::Irreps::printAll(){
 
    for (int thegroup=0; thegroup<8; thegroup++){
       cout << "######################################################" << endl;
       cout << "Name = " << getGroupNamePrivate(thegroup) << endl;
-      cout << "nIrreps = " << getNumberOfIrrepsPrivate(thegroup) << endl;
+      cout << "nIrreps = " << getNumberOfIrreps(thegroup) << endl;
       cout << "Multiplication table :" << endl;
-      for (int irrep1=-1; irrep1<getNumberOfIrrepsPrivate(thegroup); irrep1++){
-         for (int irrep2=-1; irrep2<getNumberOfIrrepsPrivate(thegroup); irrep2++){
+      for (int irrep1=-1; irrep1<getNumberOfIrreps(thegroup); irrep1++){
+         for (int irrep2=-1; irrep2<getNumberOfIrreps(thegroup); irrep2++){
             if ((irrep1 == -1) && (irrep2 == -1)) cout << "\t";
             if ((irrep1 == -1) && (irrep2 >= 0 )) cout << getIrrepNamePrivate(thegroup, irrep2) << "\t";
             if ((irrep2 == -1) && (irrep1 >= 0 )) cout << getIrrepNamePrivate(thegroup, irrep1) << "\t";

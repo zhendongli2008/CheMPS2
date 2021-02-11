@@ -1,6 +1,6 @@
 /*
    CheMPS2: a spin-adapted implementation of DMRG for ab initio quantum chemistry
-   Copyright (C) 2013, 2014 Sebastian Wouters
+   Copyright (C) 2013-2021 Sebastian Wouters
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -17,17 +17,20 @@
    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 */
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
 #include <iostream>
 #include <string>
 #include <fstream>
+#include <sys/stat.h>
+
+#include <hdf5.h>
 
 #include "Irreps.h"
 #include "TwoIndex.h"
 #include "FourIndex.h"
 #include "Hamiltonian.h"
-#include "MyHDF5.h"
 
 using std::cout;
 using std::endl;
@@ -54,25 +57,28 @@ CheMPS2::Hamiltonian::Hamiltonian(const int Norbitals, const int nGroup, const i
       irrep2num_orb[orb2irrep[cnt]]++;
    }
    
+   Econst = 0.0;
    Tmat = new TwoIndex(SymmInfo.getGroupNumber(),irrep2num_orb);
    Vmat = new FourIndex(SymmInfo.getGroupNumber(),irrep2num_orb);
 
 }
 
-CheMPS2::Hamiltonian::Hamiltonian(const string file_psi4text){
+CheMPS2::Hamiltonian::Hamiltonian( const string filename, const int psi4groupnumber ){
 
-   CreateAndFillFromPsi4dump( file_psi4text );
-   
+    SymmInfo.setGroup( psi4groupnumber );
+    CreateAndFillFromFCIDUMP( filename );
+
 }
 
-CheMPS2::Hamiltonian::Hamiltonian(const bool fileh5, const string main_file, const string file_tmat, const string file_vmat){
+CheMPS2::Hamiltonian::Hamiltonian( const bool fileh5, const string main_file, const string file_tmat, const string file_vmat ){
 
-   if (fileh5){
+   if ( fileh5 ){
       CreateAndFillFromH5( main_file, file_tmat, file_vmat );
    } else {
-      CreateAndFillFromPsi4dump( main_file );
+      cout << "CheMPS2::Hamiltonian::Hamiltonian( false, const string , const string , const string ) was deprecated." << endl;
+      assert( fileh5 == true );
    }
-   
+
 }
 
 CheMPS2::Hamiltonian::~Hamiltonian(){
@@ -112,6 +118,8 @@ double CheMPS2::Hamiltonian::getTmat(const int index1, const int index2) const{
    
 }
 
+const CheMPS2::TwoIndex * CheMPS2::Hamiltonian::getTmat(){ return Tmat; }
+
 void CheMPS2::Hamiltonian::setVmat(const int index1, const int index2, const int index3, const int index4, const double val){
 
    assert( Irreps::directProd(orb2irrep[index1],orb2irrep[index2]) == Irreps::directProd(orb2irrep[index3],orb2irrep[index4]) );
@@ -135,6 +143,8 @@ double CheMPS2::Hamiltonian::getVmat(const int index1, const int index2, const i
    return 0.0;
    
 }
+
+CheMPS2::FourIndex * CheMPS2::Hamiltonian::getVmat(){ return Vmat; }
 
 void CheMPS2::Hamiltonian::save(const string file_parent, const string file_tmat, const string file_vmat) const{
 
@@ -283,135 +293,291 @@ void CheMPS2::Hamiltonian::CreateAndFillFromH5(const string file_parent, const s
 
 }
 
-//Works for the file mointegrals/mointegrals.cc_PRINT which can be used as a plugin in psi4 beta5
-void CheMPS2::Hamiltonian::CreateAndFillFromPsi4dump(const string filename){
+void CheMPS2::Hamiltonian::CreateAndFillFromFCIDUMP( const string fcidumpfile ){
 
-   string line, part;
-   int pos;
-   
-   ifstream inputfile(filename.c_str());
-   
-   //First go to the start of the integral dump.
-   bool stop = false;
-   string start = "****  Molecular Integrals For CheMPS Start Here";
-   do{
-      getline(inputfile,line);
-      pos = line.find(start);
-      if (pos==0) stop = true;
-   } while (!stop);
-   
-   //Get the group name and convert it to the group number
-   getline(inputfile,line);
-   pos = line.find("=");
-   part = line.substr(pos+2,line.size()-pos-3);
-   int nGroup = 0;
-   stop = false;
-   do {
-      if (part.compare(SymmInfo.getGroupName(nGroup))==0) stop = true;
-      else nGroup += 1;
-   } while (!stop);
-   SymmInfo.setGroup(nGroup);
-   //cout << "The group was found to be " << SymmInfo.getGroupName() << " ." << endl;
-   
-   //This line says how many irreps there are: skip.
-   getline(inputfile,line);
-   
-   //This line contains the nuclear energy part.
-   getline(inputfile,line);
-   pos = line.find("=");
-   part = line.substr(pos+2,line.size()-pos-3);
-   Econst = atof(part.c_str());
+    struct stat file_info;
+    const bool on_disk = (( fcidumpfile.length() > 0 ) && ( stat( fcidumpfile.c_str(), &file_info ) == 0 ));
+    if ( on_disk == false ){
+       cout << "CheMPS2::Hamiltonian : Unable to find FCIDUMP file " << fcidumpfile << "!" << endl;
+    }
+    assert( on_disk );
 
-   //This line contains the number of MO's.
-   getline(inputfile,line);
-   pos = line.find("=");
-   part = line.substr(pos+2,line.size()-pos-3);
-   L = atoi(part.c_str());
+    cout << "CheMPS2::Hamiltonian : Reading FCIDUMP file " << fcidumpfile << endl;
+
+    const int nIrreps = SymmInfo.getNumberOfIrreps();
+    int * psi2molpro = new int[ nIrreps ];
+    SymmInfo.symm_psi2molpro( psi2molpro );
+
+    ifstream thefcidump( fcidumpfile.c_str() );
+    string line, part;
+    int pos, pos2;
+
+    // Get the number of orbitals
+    getline( thefcidump, line ); // &FCI NORB= X,NELEC= Y,MS2= Z,   
+    pos  = line.find( "NORB" );
+    pos  = line.find( "=", pos ); //1
+    pos2 = line.find( ",", pos ); //4
+    part = line.substr( pos+1, pos2-pos-1 );
+    L = atoi( part.c_str() );
+    if ( CheMPS2::HAMILTONIAN_debugPrint ){ cout << "The number of orbitals <<" << part << ">> or " << L << "." << endl; }
+
+    // Get the orbital irreps in psi4 convention (XOR, see Irreps.h).
+    orb2irrep = new int[ L ];
+    getline( thefcidump, line ); //  ORBSYM=A,B,C,D,
+    getline( thefcidump, part );
+    while ( part.find( "ISYM" ) == string::npos ){
+       pos = line.find("\n");
+       if ( pos != string::npos ){ line.erase( pos ); }
+       pos = part.find(" ");
+       if ( pos != string::npos ){ part.erase( pos, 1 ); }
+       line.append( part );
+       getline( thefcidump, part );
+    }
+    pos = line.find( "ORBSYM" );
+    pos = line.find( "=", pos ); //1
+    for ( int orb = 0; orb < L; orb++ ){
+        pos2 = line.find( ",", pos+1 ); //3
+        part = line.substr( pos+1, pos2-pos-1 );
+        const int molproirrep = atoi( part.c_str() );
+        if ( CheMPS2::HAMILTONIAN_debugPrint ){ cout << "This molpro irrep <<" << part << ">> or " << molproirrep << "." << endl; }
+        orb2irrep[ orb ] = -1;
+        for ( int irrep = 0; irrep < nIrreps; irrep++ ){
+            if ( molproirrep == psi2molpro[ irrep ] ){
+                orb2irrep[ orb ] = irrep;
+            }
+        }
+        assert( orb2irrep[ orb ] != -1 );
+        pos = pos2;
+    }
+
+    getline( thefcidump, line ); // /
+    assert( line.size() < 16 );
+
+    orb2indexSy = new int[ L ];
+    irrep2num_orb = new int[ nIrreps ];
+    for ( int cnt = 0; cnt < nIrreps; cnt++){ irrep2num_orb[cnt] = 0; }
+    for ( int cnt = 0; cnt < L; cnt++){
+        orb2indexSy[cnt] = irrep2num_orb[orb2irrep[cnt]];
+        irrep2num_orb[orb2irrep[cnt]]++;
+    }
+    Tmat = new TwoIndex(  SymmInfo.getGroupNumber(), irrep2num_orb ); // Constructor ends with Clear(); call
+    Vmat = new FourIndex( SymmInfo.getGroupNumber(), irrep2num_orb ); // Constructor ends with Clear(); call
+
+    // Read the Hamiltonian in
+    bool stop = false;
+    while ( stop == false ){
+    
+        getline( thefcidump, line ); // value i1 i2 i3 i4
+        pos  = line.find( " " );
+        pos2 = line.find( "." );
+        pos2 = line.find( " ", pos2 );
+        part = line.substr( pos, pos2-pos );
+        if ( CheMPS2::HAMILTONIAN_debugPrint ){ cout << "Next line: <<" << part << ">> <<"; }
+        const double value = atof( part.c_str() );
+        pos  = pos2;
+        while ( line.substr( pos, 1 ).compare(" ")==0 ){ pos++; }
+        pos2 = line.find( " ", pos );
+        part = line.substr( pos, pos2-pos );
+        if ( CheMPS2::HAMILTONIAN_debugPrint ){ cout << part << ">> <<"; }
+        const int index1 = atoi( part.c_str() );
+        pos  = pos2;
+        while ( line.substr( pos, 1 ).compare(" ")==0 ){ pos++; }
+        pos2 = line.find( " ", pos );
+        part = line.substr( pos, pos2-pos );
+        if ( CheMPS2::HAMILTONIAN_debugPrint ){ cout << part << ">> <<"; }
+        const int index2 = atoi( part.c_str() );
+        pos  = pos2;
+        while ( line.substr( pos, 1 ).compare(" ")==0 ){ pos++; }
+        pos2 = line.find( " ", pos );
+        part = line.substr( pos, pos2-pos );
+        if ( CheMPS2::HAMILTONIAN_debugPrint ){ cout << part << ">> <<"; }
+        const int index3 = atoi( part.c_str() );
+        pos  = pos2;
+        while ( line.substr( pos, 1 ).compare(" ")==0 ){ pos++; }
+        part = line.substr( pos, line.size()-pos );
+        if ( CheMPS2::HAMILTONIAN_debugPrint ){ cout << part << ">>." << endl; }
+        const int index4 = atoi( part.c_str() );
+        if ( CheMPS2::HAMILTONIAN_debugPrint ){
+           cout << "Same line: " << value << " " << index1 << " " << index2 << " " << index3 << " " << index4 << endl;
+        }
+        
+        if ( index4 != 0 ){
+            setVmat( index1-1, index3-1, index2-1, index4-1, value ); // From chemists to physicist notation!
+        } else {
+            if ( index2 != 0 ){ setTmat( index1-1, index2-1, value ); }
+            else {
+                Econst = value;
+                stop = true;
+            }
+        }
+    
+    }
+    
+    if ( CheMPS2::HAMILTONIAN_debugPrint ){ debugcheck(); }
+
+    delete [] psi2molpro;
+    thefcidump.close();
+
+    cout << "CheMPS2::Hamiltonian : Finished reading FCIDUMP file " << fcidumpfile << endl;
+
+}
+
+void CheMPS2::Hamiltonian::readfock( const string fockfile, double * fockmx, const bool printinfo ) const{
+
+/************************
+ *   FOCK file format   *
+************************************
+ &FOCK NACT= X,
+  ORBSYM=X,X,X,X,
+ /
+  1.1234567890123456E-03   I   J
+  1.1234567890123456E-03   I   J
+************************************
+     Remark: ORBSYM are the MOLPRO irreps !!!
+*/
+
+    struct stat file_info;
+    const bool on_disk = (( fockfile.length() > 0 ) && ( stat( fockfile.c_str(), &file_info ) == 0 ));
+    if ( on_disk == false ){
+       cout << "Unable to find the FOCK file " << fockfile << "!" << endl;
+    }
+    assert( on_disk );
+
+    cout << "Reading FOCK file " << fockfile << endl;
+
+    const int nIrreps = SymmInfo.getNumberOfIrreps();
+    int * psi2molpro = new int[ nIrreps ];
+    SymmInfo.symm_psi2molpro( psi2molpro );
+
+    ifstream thedump( fockfile.c_str() );
+    string line, part;
+    int pos, pos2;
+
+    // Double check the number of orbitals
+    getline( thedump, line ); // &FOCK NACT= X,
+    pos  = line.find( "NACT" );
+    pos  = line.find( "=", pos ); //1
+    pos2 = line.find( ",", pos ); //4
+    part = line.substr( pos+1, pos2-pos-1 );
+    const int LAS = atoi( part.c_str() );
+    if ( LAS != getL() ){
+       cout << "The number of orbitals in the FOCK file and Hamiltonian object does not match!" << endl;
+       assert( LAS == getL() );
+    }
+
+    // Double check the orbital irreps
+    getline( thedump, line ); //  ORBSYM=A,B,C,D,
+    getline( thedump, part );
+    while ( part.find( "/" ) == string::npos ){
+        pos = line.find( "\n" );
+        if ( pos != string::npos ){ line.erase( pos ); }
+        pos = part.find( " " );
+        if ( pos != string::npos ){ part.erase( pos, 1 ); }
+        line.append( part );
+        getline( thedump, part );
+    }
+    pos = line.find( "ORBSYM" );
+    pos = line.find( "=", pos ); //1
+    for ( int orb = 0; orb < LAS; orb++ ){
+        pos2 = line.find( ",", pos+1 ); //3
+        part = line.substr( pos+1, pos2-pos-1 );
+        const int molproirrep = atoi( part.c_str() );
+        if ( molproirrep != psi2molpro[ getOrbitalIrrep( orb ) ] ){
+            cout << "The irrep of orbital " << orb << " in the FOCK file and Hamiltonian object does not match!" << endl;
+            assert( molproirrep == psi2molpro[ getOrbitalIrrep( orb ) ] );
+        }
+        pos = pos2;
+    }
+
+    // Read the FOCK matrix in
+    for ( int cnt = 0; cnt < LAS * LAS; cnt++ ){ fockmx[ cnt ] = 0.0; }
+    while ( getline( thedump, line ) ){ // value i1 i2
+
+        if ( line.length() > 2 ){
+
+            pos  = line.find( " " );
+            pos2 = line.find( "." );
+            pos2 = line.find( " ", pos2 );
+            part = line.substr( pos, pos2-pos );
+            const double value = atof( part.c_str() );
+            pos  = pos2;
+            while ( line.substr( pos, 1 ).compare(" ") == 0 ){ pos++; }
+            pos2 = line.find( " ", pos );
+            part = line.substr( pos, pos2-pos );
+            const int index1 = atoi( part.c_str() );
+            pos  = pos2;
+            while ( line.substr( pos, 1 ).compare(" ") == 0 ){ pos++; }
+            pos2 = line.find( " ", pos );
+            part = line.substr( pos, pos2-pos );
+            const int index2 = atoi( part.c_str() );
+
+            if ( printinfo ){
+                cout << "        Processed FOCK( " << index1 << ", " << index2 << " ) = " << value << endl;
+            }
+
+            const int orb1 = index1 - 1;
+            const int orb2 = index2 - 1;
+
+            if ( getOrbitalIrrep( orb1 ) != getOrbitalIrrep( orb2 ) ){
+                cout << "In the FOCK file a specific value is given for orbitals " << index1 << " and " << index2 << " which have different irreps. This is not allowed!" << endl;
+                assert( getOrbitalIrrep( orb1 ) == getOrbitalIrrep( orb2 ) );
+            }
+
+            fockmx[ orb1 + LAS * orb2 ] = value;
+            fockmx[ orb2 + LAS * orb1 ] = value;
+
+        }
+    }
+
+    delete [] psi2molpro;
+    thedump.close();
+
+    cout << "Finished reading FOCK file " << fockfile << endl;
+
+}
+
+void CheMPS2::Hamiltonian::writeFCIDUMP( const string fcidumpfile, const int Nelec, const int TwoS, const int TargetIrrep ) const{
+
+   int * psi2molpro = new int[ SymmInfo.getNumberOfIrreps() ];
+   SymmInfo.symm_psi2molpro( psi2molpro );
    
-   //This line contains only text
-   getline(inputfile,line);
-   
-   //This line contains the irrep numbers --> allocate, read in & set
-   getline(inputfile,line);
-   
-   orb2irrep = new int[L];
-   orb2indexSy = new int[L];
-   int nIrreps = SymmInfo.getNumberOfIrreps();
-   irrep2num_orb = new int[nIrreps];
-   
-   pos = 0;
-   do {
-      orb2irrep[pos] = atoi(line.substr(2*pos,1).c_str());
-      pos++;
-   } while (2*pos < (int)line.size()-1);
-   
-   for (int cnt=0; cnt<nIrreps; cnt++) irrep2num_orb[cnt] = 0;
-   for (int cnt=0; cnt<L; cnt++){
-      orb2indexSy[cnt] = irrep2num_orb[orb2irrep[cnt]];
-      irrep2num_orb[orb2irrep[cnt]]++;
+   FILE * capturing;
+   capturing = fopen( fcidumpfile.c_str(), "w" ); // "w" with fopen means truncate file
+   fprintf( capturing, " &FCI NORB= %d,NELEC= %d,MS2= %d,\n", getL(), Nelec, TwoS );
+   fprintf( capturing, "  ORBSYM=" );
+   for (int orb=0; orb<getL(); orb++){
+      fprintf( capturing, "%d,", psi2molpro[getOrbitalIrrep(orb)] );
    }
-   Tmat = new TwoIndex(SymmInfo.getGroupNumber(),irrep2num_orb);
-   Vmat = new FourIndex(SymmInfo.getGroupNumber(),irrep2num_orb);
+   fprintf( capturing, "\n  ISYM=%d,\n /\n", psi2molpro[TargetIrrep] );
+   delete [] psi2molpro;
    
-   //Skip three lines --> number of double occupations, single occupations and test line
-   getline(inputfile,line);
-   getline(inputfile,line);
-   getline(inputfile,line);
-   
-   //Read in one-electron integrals
-   getline(inputfile,line);
-   int pos2, index1, index2;
-   double value;
-   while( (line.substr(0,1)).compare("*")!=0 ){
-   
-      pos = 0;
-      pos2 = line.find(" ",pos);
-      index1 = atoi(line.substr(pos,pos2-pos).c_str());
-      
-      pos = pos2+1;
-      pos2 = line.find(" ",pos);
-      index2 = atoi(line.substr(pos,pos2-pos).c_str());
-      
-      value = atof(line.substr(pos2+1,line.size()-pos2-2).c_str());
-      
-      setTmat(index1,index2,value);
-      
-      getline(inputfile,line);
-   
+   for (int p=0; p<getL(); p++){
+      for (int q=0; q<=p; q++){ // p>=q
+         const int irrep_pq = Irreps::directProd( getOrbitalIrrep(p), getOrbitalIrrep(q) );
+         for (int r=0; r<=p; r++){ // p>=r
+            for (int s=0; s<=r; s++){ // r>=s
+               const int irrep_rs = Irreps::directProd( getOrbitalIrrep(r), getOrbitalIrrep(s) );
+               if ( irrep_pq == irrep_rs ){
+                  if ( ( p > r ) || ( ( p == r ) && ( q >= s ) ) ){
+                     fprintf( capturing, " % 23.16E %3d %3d %3d %3d\n", getVmat(p,r,q,s), p+1, q+1, r+1, s+1 );
+                  }
+               }
+            }
+         }
+      }
+   }
+
+   for (int p=0; p<getL(); p++){
+      for (int q=0; q<=p; q++){ // p>=q
+         if ( getOrbitalIrrep(p) == getOrbitalIrrep(q) ){
+            fprintf( capturing, " % 23.16E %3d %3d %3d %3d\n", getTmat(p,q), p+1, q+1, 0, 0 );
+         }
+      }
    }
    
-   //Read in two-electron integrals --> in file: chemical notation; in Vmat: physics notation
-   getline(inputfile,line);
-   int index3, index4;
-   while( (line.substr(0,1)).compare("*")!=0 ){
-   
-      pos = 0;
-      pos2 = line.find(" ",pos);
-      index1 = atoi(line.substr(pos,pos2-pos).c_str());
-      
-      pos = pos2+1;
-      pos2 = line.find(" ",pos);
-      index2 = atoi(line.substr(pos,pos2-pos).c_str());
-      
-      pos = pos2+1;
-      pos2 = line.find(" ",pos);
-      index3 = atoi(line.substr(pos,pos2-pos).c_str());
-      
-      pos = pos2+1;
-      pos2 = line.find(" ",pos);
-      index4 = atoi(line.substr(pos,pos2-pos).c_str());
-      
-      value = atof(line.substr(pos2+1,line.size()-pos2-2).c_str());
-      
-      setVmat(index1, index3, index2, index4, value);
-      
-      getline(inputfile,line);
-   
-   }
-   
-   if (CheMPS2::HAMILTONIAN_debugPrint) debugcheck();
-   
-   inputfile.close();
+   fprintf( capturing, " % 23.16E %3d %3d %3d %3d", getEconst(), 0, 0, 0, 0 );
+   fclose( capturing );
+   cout << "Created the FCIDUMP file " << fcidumpfile << "." << endl;
 
 }
 
